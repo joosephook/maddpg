@@ -1,4 +1,5 @@
 import argparse
+import random
 import numpy as np
 import tensorflow as tf
 import time
@@ -15,8 +16,9 @@ def parse_args():
     parser.add_argument("--max-episode-len", type=int, default=25, help="maximum episode length")
     parser.add_argument("--num-episodes", type=int, default=60000, help="number of episodes")
     parser.add_argument("--num-adversaries", type=int, default=0, help="number of adversaries")
-    parser.add_argument("--good-policy", type=str, default="maddpg", help="policy for good agents")
-    parser.add_argument("--adv-policy", type=str, default="maddpg", help="policy of adversaries")
+    parser.add_argument("--good-policy", type=str, default="maddpg-tmp", help="policy for good agents")
+    parser.add_argument("--adv-policy", type=str, default="maddpg-tmp", help="policy of adversaries")
+    parser.add_argument("--seed", type=int, default=0, help="random seed")
     # Core training parameters
     parser.add_argument("--lr", type=float, default=1e-2, help="learning rate for Adam optimizer")
     parser.add_argument("--gamma", type=float, default=0.95, help="discount factor")
@@ -34,6 +36,9 @@ def parse_args():
     parser.add_argument("--benchmark-iters", type=int, default=100000, help="number of iterations run for benchmarking")
     parser.add_argument("--benchmark-dir", type=str, default="./benchmark_files/", help="directory where benchmark data is saved")
     parser.add_argument("--plots-dir", type=str, default="./learning_curves/", help="directory where plot data is saved")
+
+    # Model selection
+    parser.add_argument("--model", type=str, default="baseline", help="baseline or sa model", choices=['baseline', 'sa'])
     return parser.parse_args()
 
 def mlp_model(input, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None):
@@ -43,7 +48,26 @@ def mlp_model(input, num_outputs, scope, reuse=False, num_units=64, rnn_cell=Non
         out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
         out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
         out = layers.fully_connected(out, num_outputs=num_outputs, activation_fn=None)
+
         return out
+
+def selective_attention_model(input, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None):
+    # This model takes as input an observation and returns values of all actions
+    with tf.variable_scope(scope, reuse=reuse):
+        x = input
+        x = layers.fully_connected(x, num_outputs=num_units, activation_fn=tf.nn.relu)
+        x = layers.fully_connected(x, num_outputs=num_units, activation_fn=tf.nn.relu)
+        input_shape = input.get_shape().as_list()
+        selection = layers.fully_connected(x, num_outputs=input_shape[-1], activation_fn=tf.nn.relu)
+
+        out = tf.multiply(input, selection)
+        out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
+        out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
+        out = layers.fully_connected(out, num_outputs=num_outputs, activation_fn=None)
+
+        return out
+
+MODELS = {'baseline':mlp_model, 'sa':selective_attention_model}
 
 def make_env(scenario_name, arglist, benchmark=False):
     from multiagent.environment import MultiAgentEnv
@@ -63,15 +87,16 @@ def make_env(scenario_name, arglist, benchmark=False):
 def get_trainers(env, num_adversaries, obs_shape_n, arglist):
     trainers = []
     model = mlp_model
+    critic = MODELS[arglist.model]
     trainer = MADDPGAgentTrainer
     for i in range(num_adversaries):
         trainers.append(trainer(
             "agent_%d" % i, model, obs_shape_n, env.action_space, i, arglist,
-            local_q_func=(arglist.adv_policy=='ddpg')))
+            local_q_func=(arglist.adv_policy=='ddpg'), q_func=critic))
     for i in range(num_adversaries, env.n):
         trainers.append(trainer(
             "agent_%d" % i, model, obs_shape_n, env.action_space, i, arglist,
-            local_q_func=(arglist.good_policy=='ddpg')))
+            local_q_func=(arglist.good_policy=='ddpg'), q_func=critic))
     return trainers
 
 
@@ -190,4 +215,7 @@ def train(arglist):
 
 if __name__ == '__main__':
     arglist = parse_args()
+    random.seed(arglist.seed)
+    tf.set_random_seed(arglist.seed)
+    np.random.seed(arglist.seed)
     train(arglist)
